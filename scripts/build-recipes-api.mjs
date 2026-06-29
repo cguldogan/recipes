@@ -24,6 +24,8 @@ import {
   listCompatibleHardware,
   recommendStrategy,
   fitsSingleNode,
+  isHardwareScalable,
+  pickFittingVariant,
   pdFitsSingleNode,
   resolveCommand,
   computeDockerMeta,
@@ -65,7 +67,7 @@ function resolveDockerImage(recipe, baseCuda) {
   if (typeof override !== "object") return DEFAULT_IMAGE;
 
   const isCudaMap = (v) => v && typeof v === "object" && ("cu129" in v || "cu130" in v);
-  const isBrandKeyed = "nvidia" in override || "amd" in override || "tpu" in override;
+  const isBrandKeyed = "nvidia" in override || "amd" in override || "tpu" in override || "intel" in override;
 
   const pickFromCudaMap = (m) => m[baseCuda] || m.cu129 || m.cu130 || DEFAULT_IMAGE;
 
@@ -179,7 +181,7 @@ function renderCommand(recipe, variantKey, strategy, hwId, nodeCount, features, 
 
   const variant = recipe.variants?.[variantKey] || recipe.variants?.default || {};
   const hwProfile = taxonomy.hardware_profiles?.[hwId] || {};
-  const dockerMeta = computeDockerMeta(recipe, variant, hwProfile);
+  const dockerMeta = computeDockerMeta(recipe, variant, hwProfile, hwId);
   const env = result.env || {};
 
   const base = {
@@ -241,13 +243,25 @@ function renderCommand(recipe, variantKey, strategy, hwId, nodeCount, features, 
 // writes each alternative to its own file and replaces it with a path link.
 // Null for omni recipes or unknown variants.
 function buildVariantRendering(recipe, variantKey, hwId, strategies, taxonomy) {
-  const variant = recipe.variants?.[variantKey];
+  let variant = recipe.variants?.[variantKey];
   if (!variant) return null;
   if ((recipe.meta?.tasks || []).includes("omni")) return null;
 
   const hwProfile = taxonomy.hardware_profiles?.[hwId] || {};
-  const compatible = recipe.compatible_strategies || [];
-  const supportsMultiNode = compatible.some((s) => s.startsWith("multi_node_"));
+  const scalable = isHardwareScalable(hwProfile);
+  // Non-scalable hardware (single-GPU workstation, e.g. DGX Station) can't
+  // shard an oversized variant — substitute the largest variant that fits, and
+  // skip multi-node strategies. Mirrors the command builder's UI behavior.
+  if (!scalable && !fitsSingleNode(hwProfile, variant)) {
+    const fitting = pickFittingVariant(recipe, hwProfile, hwId);
+    if (!fitting) return null;
+    variantKey = fitting;
+    variant = recipe.variants[fitting];
+  }
+  const compatible = (recipe.compatible_strategies || []).filter(
+    (s) => scalable || (!s.startsWith("multi_node_") && s !== "pd_cluster")
+  );
+  const supportsMultiNode = scalable && compatible.some((s) => s.startsWith("multi_node_"));
   const recommendedNodeCount = !fitsSingleNode(hwProfile, variant) && supportsMultiNode ? 2 : 1;
   const recommendedStrategy = recommendStrategy(recipe, hwProfile, recommendedNodeCount);
   const recommendedFeatures = defaultFeaturesFor(recipe, hwId);
@@ -303,6 +317,15 @@ function findYamlFiles(dir) {
 // ── Taxonomy ──
 const taxonomy = normalizeDates(readYaml(path.join(ROOT, "taxonomy.yaml")));
 writeJson("taxonomy.json", taxonomy);
+
+// ── Platforms ── (third-party self-host targets; flat catalog)
+const platformsFile = path.join(ROOT, "platforms.yaml");
+let platformsCount = 0;
+if (fs.existsSync(platformsFile)) {
+  const platforms = normalizeDates(readYaml(platformsFile));
+  writeJson("platforms.json", platforms);
+  platformsCount = Array.isArray(platforms?.platforms) ? platforms.platforms.length : 0;
+}
 
 // ── Strategies ──
 const strategiesDir = path.join(ROOT, "strategies");
@@ -362,6 +385,11 @@ function renderAndWriteVariant(recipe, variantKey, altBaseHfId, strategies, taxo
   const variant = recipe.variants?.[variantKey];
   if (!variant) return null;
   if ((recipe.meta?.tasks || []).includes("omni")) return null;
+
+  // Hardware/strategy compatibility can shrink between recipe revisions.
+  // Clear this variant's generated subtree so removed targets do not survive
+  // as stale, directly-addressable JSON files from an earlier build.
+  fs.rmSync(path.join(PUBLIC, altBaseHfId), { recursive: true, force: true });
 
   const hwProfiles = taxonomy.hardware_profiles || {};
   const defaultHw = pickDefaultHardware(hwProfiles, variant, recipe);
@@ -553,7 +581,7 @@ const hwIndexedCount = recipes.reduce(
   (n, r) => n + Object.keys(r.recommended_command?.by_hardware || {}).length, 0
 );
 console.log(
-  `✓ JSON API: ${recipes.length} models (${rcCount} with recommended_command, ${altCount} default-hw alternatives, ${hwIndexedCount} per-hw renderings), ${promotedCount} promoted variants, ${Object.keys(strategies).length} strategies` +
+  `✓ JSON API: ${recipes.length} models (${rcCount} with recommended_command, ${altCount} default-hw alternatives, ${hwIndexedCount} per-hw renderings), ${promotedCount} promoted variants, ${Object.keys(strategies).length} strategies, ${platformsCount} platforms` +
   (collisionCount ? ` (${collisionCount} variant collision${collisionCount > 1 ? "s" : ""} skipped)` : "")
 );
 console.log(`  /models.json`);
@@ -564,3 +592,4 @@ console.log(`  /{hf_id}/hw/{hw}/strategies/{strategy}.json  (per-(hw, strategy) 
 console.log(`  /{variant_hf_id}.json                        (promoted variants, e.g. /zai-org/GLM-5.1-FP8.json)`);
 console.log(`  /strategies.json`);
 console.log(`  /taxonomy.json`);
+console.log(`  /platforms.json`);

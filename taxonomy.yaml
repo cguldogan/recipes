@@ -47,10 +47,11 @@ hardware_profiles:
   # opt in via `meta.hardware` (e.g. `rtx5090: verified`), since the vast
   # majority of recipes target multi-GPU server nodes that won't fit on a
   # single 32 GB consumer card.
-  # `workstation: true` marks single-chassis consumer/workstation rigs. Unlike
+  # `scalable: false` marks single-chassis consumer/workstation rigs. Unlike
   # server nodes (H200, B200…), you can't form a real 2-node cluster from one
   # desktop, so the command builder never bumps these to multi-node — it keeps
-  # the honest single-node command (and flags it if the model doesn't fit).
+  # the honest single-node command (and falls back to a fitting variant when the
+  # model doesn't fit). Same flag the DGX Station / DGX Spark profiles use.
   rtx5090:
     brand: NVIDIA
     generation: blackwell
@@ -59,7 +60,7 @@ hardware_profiles:
     gpu_count: 1
     vram_gb: 32
     multi_node: false
-    workstation: true
+    scalable: false
     restricted: true
 
   # ── Local workstation rig (2× RTX 5090 + RTX PRO 6000) ──
@@ -76,7 +77,7 @@ hardware_profiles:
     gpu_count: 2
     vram_gb: 64
     multi_node: false
-    workstation: true
+    scalable: false
 
   rtx_pro_6000:
     brand: NVIDIA
@@ -86,7 +87,7 @@ hardware_profiles:
     gpu_count: 1
     vram_gb: 96
     multi_node: false
-    workstation: true
+    scalable: false
 
   # ── NVIDIA Blackwell Ultra ──
   b300:
@@ -106,6 +107,37 @@ hardware_profiles:
     gpu_count: 4
     vram_gb: 1152
     multi_node: false
+
+  # DGX Station — single-GPU Grace-Blackwell Ultra desktop workstation.
+  # `restricted: true` keeps it out of the picker unless a recipe explicitly
+  # lists it in `meta.hardware` (same pattern as the TPU profiles).
+  # `scalable: false` marks it non-clusterable: it can't be joined into a
+  # multi-node deployment, so VRAM is a hard limit and variants that don't fit
+  # one box are disabled in the UI (the builder falls back to a fitting variant).
+  dgx_station_gb300:
+    brand: NVIDIA
+    generation: blackwell
+    display_name: "DGX Station (GB300)"
+    description: "NVIDIA DGX Station · 1× GB300 Grace-Blackwell Ultra Superchip · 252 GB HBM3e (desktop workstation)"
+    gpu_count: 1
+    vram_gb: 252
+    multi_node: false
+    scalable: false
+    restricted: true
+
+  # DGX Spark — single-GPU GB10 desktop system.
+  # `restricted: true` keeps it out of the picker unless a recipe explicitly
+  # lists it in `meta.hardware` (same pattern as the TPU profiles).
+  dgx_spark_gb10:
+    brand: NVIDIA
+    generation: blackwell
+    display_name: "DGX Spark (GB10)"
+    description: "NVIDIA DGX Spark · 1× GB10 Grace Blackwell Superchip · 128 GB unified memory"
+    gpu_count: 1
+    vram_gb: 128
+    multi_node: false
+    scalable: false
+    restricted: true
 
   # ── AMD Instinct ──
   mi300x:
@@ -156,6 +188,27 @@ hardware_profiles:
     description: "Google Cloud TPU v7 Ironwood · 192 GB HBM/chip · served via vLLM TPU"
     gpu_count: 1
     vram_gb: 192
+    multi_node: false
+    restricted: true
+
+  # ── Intel Xeon CPU ──
+  xeon6:
+    brand: Intel
+    generation: cpu
+    display_name: "Xeon 6"
+    description: "Intel Xeon 6 CPU NUMA node · x86 CPU backend"
+    gpu_count: 4
+    vram_gb: 1024
+    multi_node: false
+    restricted: true
+
+  xeon5:
+    brand: Intel
+    generation: cpu
+    display_name: "Xeon 5"
+    description: "Intel Xeon 5 CPU NUMA node · x86 CPU backend"
+    gpu_count: 4
+    vram_gb: 1024
     multi_node: false
     restricted: true
 

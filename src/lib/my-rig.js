@@ -131,7 +131,7 @@ export function rigCombinedProfile(counts) {
     description: `${rigLabel(counts)} · pipeline-parallel across all cards`,
     gpu_count: totalGpus,
     vram_gb: rigVramOf(counts),
-    workstation: true,
+    scalable: false,
     parallel_mode: "pipeline",
   };
 }
