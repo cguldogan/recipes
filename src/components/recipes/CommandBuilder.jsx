@@ -1543,6 +1543,9 @@ function YourRigPanel({ rig, pools, activeVariant, activeHwId, activeVariantKey,
     );
   }
   const anyRunnable = pools.some((p) => p.fits || p.fitsWith);
+  // If a single (non-pipeline) pool already fits the active variant, combining
+  // all cards via pipeline-parallel is slower for no benefit — flag it.
+  const singleCardFits = pools.some((p) => !p.pipeline && p.fits);
   return (
     <div className="rounded-xl border border-vllm-blue/30 bg-vllm-blue/[0.04] overflow-hidden">
       <div className="px-4 py-2.5 flex items-center justify-between gap-3 border-b border-vllm-blue/15">
@@ -1586,8 +1589,12 @@ function YourRigPanel({ rig, pools, activeVariant, activeHwId, activeVariantKey,
                   {p.pipeline ? `${p.gpus} GPUs · ${p.vramGb}G` : `${p.gpus}×${p.vramGb / p.gpus}G = ${p.vramGb}G`}
                 </span>
                 <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">{p.pipeline ? "PP" : "TP"}={p.gpus}</span>
-                <span className="text-[10px] text-amber-600 dark:text-amber-500 w-24 shrink-0 truncate">
-                  {!p.fits && p.fitsWith ? `needs ${p.fitsWith.precision}` : ""}
+                <span className="text-[10px] w-36 shrink-0 truncate">
+                  {!p.fits && p.fitsWith ? (
+                    <span className="text-amber-600 dark:text-amber-500">needs {p.fitsWith.precision}</span>
+                  ) : p.pipeline && p.fits && singleCardFits ? (
+                    <span className="text-muted-foreground/70">a single card is faster</span>
+                  ) : ""}
                 </span>
                 {p.profileId ? (
                   <button
