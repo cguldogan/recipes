@@ -45,6 +45,16 @@ export default function BrowsePage() {
       precisions: [...new Set(
         Object.values(r.variants || {}).map((vv) => vv?.precision).filter(Boolean)
       )],
+      // Smallest declared VRAM footprint across all variants — a model is
+      // "runnable" on a given rig if ANY variant (e.g. a quantized sibling)
+      // fits its VRAM budget. Used by the Browse "My rig" fit filter. null
+      // when no variant declares vram_minimum_gb (don't block on missing data).
+      min_vram_gb: (() => {
+        const vals = Object.values(r.variants || {})
+          .map((vv) => vv?.vram_minimum_gb)
+          .filter((n) => typeof n === "number" && n > 0);
+        return vals.length ? Math.min(...vals) : null;
+      })(),
     };
   });
 

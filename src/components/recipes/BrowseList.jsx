@@ -104,6 +104,19 @@ const HARDWARE_BY_ID = Object.fromEntries(
   HW_BRANDS.flatMap((b) => b.items.map((it) => [it.id, it]))
 );
 
+// "My rig" budgets — total usable VRAM for each way of running the local
+// workstation (2× RTX 5090 + RTX PRO 6000). A model "fits" a budget when its
+// smallest variant's vram_minimum_gb is within it. Single-select: a larger
+// budget is a strict superset of a smaller one, so picking one pool is enough.
+// The mixed all-3 pool only makes sense as a total-VRAM budget here — it isn't
+// a real tensor-parallel config (uneven 32/32/96 GB cards).
+const RIG_OPTIONS = [
+  { id: "rig5090x2", label: "2× RTX 5090 · 64 GB", vram: 64 },
+  { id: "rigpro6000", label: "RTX PRO 6000 · 96 GB", vram: 96 },
+  { id: "rigall3", label: "All 3 cards · 160 GB", vram: 160 },
+];
+const RIG_BY_ID = Object.fromEntries(RIG_OPTIONS.map((o) => [o.id, o]));
+
 const SORT_OPTIONS = [
   { id: "released", label: "Newest" },
   { id: "updated", label: "Recently updated" },
@@ -119,7 +132,7 @@ export function BrowseList({ recipes }) {
   // Single useMemo so the Sets keep stable identity across renders. Without
   // this, downstream useMemos that depend on tasks/archs/etc. invalidate on
   // every render (Set identity changes even if URL didn't).
-  const { tasks, archs, sizes, precisions, hardware, provider, sort, q } = useMemo(() => {
+  const { tasks, archs, sizes, precisions, hardware, fit, provider, sort, q } = useMemo(() => {
     const setOf = (k) => new Set((searchParams.get(k) || "").split(",").filter(Boolean));
     return {
       tasks: setOf("task"),
@@ -127,11 +140,20 @@ export function BrowseList({ recipes }) {
       sizes: setOf("size"),
       precisions: setOf("precision"),
       hardware: setOf("hw"),
+      fit: searchParams.get("fit") || "",
       provider: searchParams.get("provider") || "",
       sort: searchParams.get("sort") || "released",
       q: (searchParams.get("q") || "").trim().toLowerCase(),
     };
   }, [searchParams]);
+
+  // True when recipe `r`'s smallest variant fits within the VRAM `budget`.
+  // Unknown footprint (null) does not fit — a "what can I run" filter should
+  // not surface models it can't confirm fit.
+  const fitsBudget = useCallback(
+    (r, budget) => typeof r.min_vram_gb === "number" && r.min_vram_gb <= budget,
+    []
+  );
 
   // Free-text match used for the `?q=...` query — same field set as the
   // top-bar SearchBox so handing off from search to browse stays predictable.
@@ -197,7 +219,7 @@ export function BrowseList({ recipes }) {
 
   const removeOne = useCallback(
     (key, value) => {
-      if (key === "provider" || key === "q") {
+      if (key === "provider" || key === "q" || key === "fit") {
         update({ [key]: "" });
         return;
       }
@@ -233,6 +255,10 @@ export function BrowseList({ recipes }) {
         const ok = [...hardware].some((h) => hw[h] === "verified");
         if (!ok) return false;
       }
+      if (exclude !== "fit" && fit) {
+        const budget = RIG_BY_ID[fit]?.vram;
+        if (budget && !fitsBudget(r, budget)) return false;
+      }
       if (exclude !== "provider" && provider && r.hf_org !== provider) return false;
       return true;
     };
@@ -255,8 +281,9 @@ export function BrowseList({ recipes }) {
       }),
       precision: tally("precision", (r) => r.precisions || []),
       hw: tally("hw", (r) => Object.entries(r.meta.hardware || {}).filter(([, s]) => s === "verified").map(([h]) => h)),
+      fit: tally("fit", (r) => RIG_OPTIONS.filter((o) => fitsBudget(r, o.vram)).map((o) => o.id)),
     };
-  }, [recipes, tasks, archs, sizes, precisions, hardware, provider, matchesQ]);
+  }, [recipes, tasks, archs, sizes, precisions, hardware, fit, provider, matchesQ, fitsBudget]);
 
   const filtered = useMemo(() => {
     const out = recipes.filter((r) => {
@@ -274,6 +301,10 @@ export function BrowseList({ recipes }) {
         const ok = [...hardware].some((h) => hw[h] === "verified");
         if (!ok) return false;
       }
+      if (fit) {
+        const budget = RIG_BY_ID[fit]?.vram;
+        if (budget && !fitsBudget(r, budget)) return false;
+      }
       if (provider && r.hf_org !== provider) return false;
       return true;
     });
@@ -286,11 +317,11 @@ export function BrowseList({ recipes }) {
       name: (a, b) => a.hf_id.localeCompare(b.hf_id),
     }[sort] || ((a, b) => 0);
     return [...out].sort(cmp);
-  }, [recipes, tasks, archs, sizes, precisions, hardware, provider, sort, matchesQ]);
+  }, [recipes, tasks, archs, sizes, precisions, hardware, fit, provider, sort, matchesQ, fitsBudget]);
 
   const activeCount =
     tasks.size + archs.size + sizes.size + precisions.size + hardware.size +
-    (provider ? 1 : 0) + (q ? 1 : 0);
+    (fit ? 1 : 0) + (provider ? 1 : 0) + (q ? 1 : 0);
   const hasFilters = activeCount > 0;
 
   // Flat list of currently-applied filters for the inline pills shown when
@@ -310,9 +341,10 @@ export function BrowseList({ recipes }) {
       const opt = HARDWARE_BY_ID[h];
       if (opt) out.push({ key: "hw", value: h, label: opt.label });
     }
+    if (fit && RIG_BY_ID[fit]) out.push({ key: "fit", value: fit, label: RIG_BY_ID[fit].label });
     if (provider) out.push({ key: "provider", value: provider, label: getProviderDisplayName(provider) });
     return out;
-  }, [q, tasks, archs, sizes, precisions, hardware, provider]);
+  }, [q, tasks, archs, sizes, precisions, hardware, fit, provider]);
 
   // Panel state persists in the URL (`?panel=open`) so a refresh keeps
   // whatever the user had. Default is closed — applied filters are
@@ -393,6 +425,22 @@ export function BrowseList({ recipes }) {
 
       {open && (
       <div className="rounded-xl border border-foreground/15 divide-y divide-foreground/10 bg-card/40">
+        <FilterRow label="My rig">
+          <PillGroup>
+            {RIG_OPTIONS.map((o) => (
+              <Chip
+                key={o.id}
+                icon={Cpu}
+                active={fit === o.id}
+                count={counts.fit[o.id]}
+                onClick={() => update({ fit: fit === o.id ? "" : o.id })}
+              >
+                {o.label}
+              </Chip>
+            ))}
+          </PillGroup>
+        </FilterRow>
+
         <FilterRow label="Task">
           <PillGroup>
             {TASK_OPTIONS.map((t) => {
