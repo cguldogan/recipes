@@ -1,0 +1,93 @@
+// "My rig" — a user's local GPU workstation, shared between the Browse filter
+// and the per-recipe "Your rig" fit panel. The rig is a map of catalog card id
+// → quantity. Total VRAM (Σ count × per-card capacity) is the fit budget.
+//
+// `profiles` maps a GPU count to the taxonomy hardware-profile id that the
+// command builder can actually emit a `vllm serve` command for. Counts without
+// a mapped profile still get a fit verdict in the panel, just no "use" button.
+
+export const CARD_CATALOG = [
+  { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32, profiles: { 1: "rtx5090", 2: "rtx5090_x2" } },
+  { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24, profiles: {} },
+  { id: "rtx3090", label: "RTX 3090", per_gpu_gb: 24, profiles: {} },
+  { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96, profiles: { 1: "rtx_pro_6000" } },
+  { id: "rtxpro5000", label: "RTX PRO 5000", per_gpu_gb: 48, profiles: {} },
+  { id: "rtxpro4500", label: "RTX PRO 4500", per_gpu_gb: 32, profiles: {} },
+];
+
+export const CARD_BY_ID = Object.fromEntries(CARD_CATALOG.map((c) => [c.id, c]));
+export const MAX_PER_CARD = 16; // sane upper bound on the quantity stepper
+const STORAGE_KEY = "vllm-recipes:my-rig";
+
+// Rig config <-> URL/storage string: `rtx5090:2,rtxpro6000:1` (count > 0 only,
+// in catalog order) so the value stays stable and shareable.
+export function parseRig(str) {
+  const counts = {};
+  for (const part of (str || "").split(",").filter(Boolean)) {
+    const [id, n] = part.split(":");
+    const c = parseInt(n, 10);
+    if (CARD_BY_ID[id] && c > 0) counts[id] = Math.min(c, MAX_PER_CARD);
+  }
+  return counts;
+}
+
+export function encodeRig(counts) {
+  return CARD_CATALOG
+    .filter((c) => counts[c.id] > 0)
+    .map((c) => `${c.id}:${counts[c.id]}`)
+    .join(",");
+}
+
+export function rigVramOf(counts) {
+  return CARD_CATALOG.reduce((sum, c) => sum + (counts[c.id] || 0) * c.per_gpu_gb, 0);
+}
+
+// "2× RTX 5090 + 1× RTX PRO 6000"
+export function rigLabel(counts) {
+  return CARD_CATALOG
+    .filter((c) => counts[c.id] > 0)
+    .map((c) => `${counts[c.id]}× ${c.label}`)
+    .join(" + ");
+}
+
+export function isRigEmpty(counts) {
+  return rigVramOf(counts) <= 0;
+}
+
+// localStorage so the rig set on Browse is remembered on every recipe page.
+// SSR-safe (guards `window`); never throws on private-mode / quota errors.
+export function loadRig() {
+  if (typeof window === "undefined") return {};
+  try {
+    return parseRig(window.localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return {};
+  }
+}
+
+export function saveRig(counts) {
+  if (typeof window === "undefined") return;
+  try {
+    const s = encodeRig(counts);
+    if (s) window.localStorage.setItem(STORAGE_KEY, s);
+    else window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Deployable single-pool options for a rig: for each owned card type, a 1× pool
+// and (when you own ≥2) an N× pool. Each carries the taxonomy profile id the
+// command builder can render, or null when none exists for that count.
+export function rigPools(counts) {
+  const pools = [];
+  for (const c of CARD_CATALOG) {
+    const n = counts[c.id] || 0;
+    if (n < 1) continue;
+    pools.push({ key: `${c.id}-1`, label: c.label, gpus: 1, vramGb: c.per_gpu_gb, profileId: c.profiles[1] || null });
+    if (n >= 2) {
+      pools.push({ key: `${c.id}-${n}`, label: `${c.label} ×${n}`, gpus: n, vramGb: c.per_gpu_gb * n, profileId: c.profiles[n] || null });
+    }
+  }
+  return pools;
+}

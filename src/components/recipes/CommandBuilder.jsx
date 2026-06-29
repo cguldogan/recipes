@@ -7,6 +7,8 @@ import { Copy, Check, Terminal, Gauge, Sparkles, ChevronDown, Package, Info, Zap
 import { resolveCommand, recommendStrategy, isPrecisionCompatible, isHardwareSupported, fitsSingleNode, pickDefaultHardware, resolveSingleNodeTp, computeDockerMeta, buildDockerRun } from "@/lib/command-synthesis";
 import { TooltipProvider, InfoTip } from "@/components/ui/tooltip";
 import { detectPlaceholdersAll, substitute, substituteEnv, loadEndpoints, saveEndpoint, clearEndpoints } from "@/lib/cluster-endpoints";
+import { loadRig, rigPools, rigLabel, rigVramOf } from "@/lib/my-rig";
+import { Cpu, Check as CheckIcon, X as XIcon } from "lucide-react";
 
 // Advanced tuning presets — optional tunable flags the user can opt into.
 // (vLLM defaults like chunked prefill, prefix caching, CUDA graphs, async
@@ -612,6 +614,36 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     if (hwProfile.workstation && nodeCount !== 1) setNodeCount(1);
   }, [hwProfile.workstation, nodeCount]);
 
+  // "Your rig" — the user's saved local workstation (from the Browse builder).
+  // Loaded client-side only (localStorage) to avoid SSR hydration mismatch:
+  // null until mounted, then the persisted card→count map.
+  const [rig, setRig] = useState(null);
+  useEffect(() => {
+    setRig(loadRig());
+    const onStorage = (e) => { if (e.key === null || e.key === "vllm-recipes:my-rig") setRig(loadRig()); };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Smallest declared variant — the most-runnable footprint, used to verdict
+  // each rig pool. { key, precision, vram } or null when no size metadata.
+  const smallestVariant = useMemo(() => {
+    return Object.entries(recipe.variants || {})
+      .map(([key, v]) => ({ key, precision: v?.precision, vram: v?.vram_minimum_gb }))
+      .filter((v) => typeof v.vram === "number" && v.vram > 0)
+      .sort((a, b) => a.vram - b.vram)[0] || null;
+  }, [recipe]);
+
+  // Single-pool deployment options from the rig, each with a fit verdict against
+  // the smallest variant. profileId !== null means the builder can emit a command.
+  const rigFitPools = useMemo(() => {
+    if (!rig || rigVramOf(rig) <= 0) return [];
+    return rigPools(rig).map((p) => ({
+      ...p,
+      fits: smallestVariant ? smallestVariant.vram <= p.vramGb : null,
+    }));
+  }, [rig, smallestVariant]);
+
   const recommended = useMemo(() => recommendStrategy(recipe, hwProfile, nodeCount), [recipe, hwProfile, nodeCount]);
 
   const compatibleStrategies = useMemo(() => {
@@ -1114,6 +1146,20 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
           );
         })()}
 
+        {/* ── Your rig — does this model run on the user's own hardware? ── */}
+        {rig !== null && (
+          <YourRigPanel
+            rig={rig}
+            pools={rigFitPools}
+            smallestVariant={smallestVariant}
+            activeHwId={hwId}
+            onUse={(pool) => {
+              if (smallestVariant) selectVariant(smallestVariant.key);
+              if (pool.profileId) selectHardware(pool.profileId);
+            }}
+          />
+        )}
+
         {/* ── Configuration ── */}
         <div className="rounded-xl border border-border divide-y divide-border">
           {/* Hardware (first — user's fixed constraint, grouped by brand) */}
@@ -1434,6 +1480,85 @@ function PdNodeInput({ label, value, gpuPerNode, onChange }) {
         × {gpuPerNode} = {value * gpuPerNode}
       </span>
     </label>
+  );
+}
+
+// "Your rig" — shows the user's saved local workstation and, for this model,
+// which of their single GPU pools can run it. Pools that map to a taxonomy
+// profile get a "use" button that loads that command into the builder.
+function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
+  const total = rigVramOf(rig);
+  if (total <= 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-border px-4 py-3 text-[13px] text-muted-foreground flex items-center gap-2 flex-wrap">
+        <Cpu size={14} className="text-muted-foreground/70" />
+        <span>
+          Set up <span className="font-medium text-foreground">your rig</span> on the{" "}
+          <a href="/browse?panel=open" className="text-vllm-blue hover:underline">Browse page</a>{" "}
+          to see whether this model runs on your own hardware.
+        </span>
+      </div>
+    );
+  }
+  const anyFits = pools.some((p) => p.fits);
+  return (
+    <div className="rounded-xl border border-vllm-blue/30 bg-vllm-blue/[0.04] overflow-hidden">
+      <div className="px-4 py-2.5 flex items-center justify-between gap-3 border-b border-vllm-blue/15">
+        <span className="inline-flex items-center gap-2 text-[13px] min-w-0">
+          <Cpu size={14} className="text-vllm-blue shrink-0" />
+          <span className="font-semibold shrink-0">Your rig</span>
+          <span className="font-mono text-muted-foreground truncate">{rigLabel(rig)} · {total} GB</span>
+        </span>
+        <a href="/browse?panel=open" className="text-[11px] text-muted-foreground hover:text-foreground transition-colors shrink-0">edit</a>
+      </div>
+      <div className="px-4 py-3 space-y-2">
+        <div className="text-[11px] text-muted-foreground">
+          {smallestVariant ? (
+            <>Smallest variant: <span className="font-mono uppercase text-foreground">{smallestVariant.precision}</span> · {smallestVariant.vram} GB to load</>
+          ) : (
+            "No VRAM metadata for this model."
+          )}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {pools.map((p) => {
+            const isActive = p.profileId && p.profileId === activeHwId;
+            return (
+              <div key={p.key} className="flex items-center gap-2.5 text-[13px]">
+                {p.fits === false ? (
+                  <XIcon size={14} className="text-rose-500 shrink-0" />
+                ) : p.fits === true ? (
+                  <CheckIcon size={14} className="text-emerald-500 shrink-0" />
+                ) : (
+                  <span className="w-3.5 inline-flex justify-center text-muted-foreground/50 shrink-0">·</span>
+                )}
+                <span className="font-medium w-32 shrink-0 truncate">{p.label}</span>
+                <span className="font-mono text-[11px] text-muted-foreground w-28 shrink-0">{p.gpus}×{p.vramGb / p.gpus}G = {p.vramGb}G</span>
+                <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">TP={p.gpus}</span>
+                {p.profileId ? (
+                  <button
+                    onClick={() => onUse(p)}
+                    className={`ml-auto rounded-md border px-2 py-0.5 text-[11px] transition-colors ${
+                      isActive
+                        ? "border-vllm-blue bg-vllm-blue/10 text-foreground"
+                        : "border-foreground/20 text-foreground/80 hover:border-foreground/40 hover:bg-muted/40"
+                    }`}
+                  >
+                    {isActive ? "selected" : "use"}
+                  </button>
+                ) : (
+                  <span className="ml-auto text-[10px] text-muted-foreground/60 italic">no recipe command</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {!anyFits && (
+          <div className="text-[12px] text-rose-500/90 pt-1">
+            This model doesn&apos;t fit any single pool in your rig — try a smaller/quantized model or more VRAM.
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

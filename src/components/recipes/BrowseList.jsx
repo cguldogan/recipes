@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Layers, Cpu, X, ArrowDownUp, Type, Eye, Sparkles, Hash, SlidersHorizontal, ChevronDown, Plus, Minus } from "lucide-react";
 import { getProviderLogo, getProviderLogoClass, getProviderDisplayName } from "@/lib/providers";
+import { CARD_CATALOG, MAX_PER_CARD, parseRig, encodeRig, rigVramOf, rigLabel, saveRig } from "@/lib/my-rig";
 
 // Per-row decorations: icon (tasks/arch) or colored dot (precision/hardware).
 // Color is family-grouped — precision tiers, GPU brands — so the eye can
@@ -103,51 +104,6 @@ const HW_BRANDS = [
 const HARDWARE_BY_ID = Object.fromEntries(
   HW_BRANDS.flatMap((b) => b.items.map((it) => [it.id, it]))
 );
-
-// "My rig" — a configurable workstation. Pick card types and a quantity for
-// each; the total VRAM is the fit budget. A model "fits" when its smallest
-// variant's vram_minimum_gb is within that total. The total is a pure VRAM
-// reachability signal — mixed-VRAM cards can't always cleanly tensor-parallel,
-// so a fit here means "could fit in your combined VRAM", not "one clean command".
-// per_gpu_gb values are single-card capacities. Extend this list to add cards.
-const CARD_CATALOG = [
-  { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32 },
-  { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24 },
-  { id: "rtx3090", label: "RTX 3090", per_gpu_gb: 24 },
-  { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96 },
-  { id: "rtxpro5000", label: "RTX PRO 5000", per_gpu_gb: 48 },
-  { id: "rtxpro4500", label: "RTX PRO 4500", per_gpu_gb: 32 },
-];
-const CARD_BY_ID = Object.fromEntries(CARD_CATALOG.map((c) => [c.id, c]));
-const MAX_PER_CARD = 16; // sane upper bound on the quantity stepper
-
-// Rig config <-> URL string. Encoded as `rig=rtx5090:2,rtxpro6000:1` — only
-// cards with count > 0, in catalog order, so the URL stays stable/shareable.
-function parseRig(str) {
-  const counts = {};
-  for (const part of (str || "").split(",").filter(Boolean)) {
-    const [id, n] = part.split(":");
-    const c = parseInt(n, 10);
-    if (CARD_BY_ID[id] && c > 0) counts[id] = Math.min(c, MAX_PER_CARD);
-  }
-  return counts;
-}
-function encodeRig(counts) {
-  return CARD_CATALOG
-    .filter((c) => counts[c.id] > 0)
-    .map((c) => `${c.id}:${counts[c.id]}`)
-    .join(",");
-}
-function rigVramOf(counts) {
-  return CARD_CATALOG.reduce((sum, c) => sum + (counts[c.id] || 0) * c.per_gpu_gb, 0);
-}
-// "2× RTX 5090 + 1× RTX PRO 6000" — for the active-filter pill / collapsed view.
-function rigLabel(counts) {
-  return CARD_CATALOG
-    .filter((c) => counts[c.id] > 0)
-    .map((c) => `${counts[c.id]}× ${c.label}`)
-    .join(" + ");
-}
 
 const SORT_OPTIONS = [
   { id: "released", label: "Newest" },
@@ -250,6 +206,12 @@ export function BrowseList({ recipes }) {
     },
     [searchParams, update]
   );
+
+  // Mirror the rig to localStorage so every recipe page's "Your rig" panel can
+  // read it. The URL stays the source of truth on Browse; this just persists it.
+  useEffect(() => {
+    saveRig(rigCounts);
+  }, [rigCounts]);
 
   // Set a card's quantity (clamped) and re-encode the whole rig into ?rig=.
   const setCardCount = useCallback(
