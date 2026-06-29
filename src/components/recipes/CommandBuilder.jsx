@@ -639,24 +639,36 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     if (hwProfile.workstation && nodeCount !== 1) setNodeCount(1);
   }, [hwProfile.workstation, nodeCount]);
 
-  // Smallest declared variant — the most-runnable footprint, used to verdict
-  // each rig pool. { key, precision, vram } or null when no size metadata.
-  const smallestVariant = useMemo(() => {
+  // All variants sorted small→large, for per-pool fit reasoning.
+  const variantsBySize = useMemo(() => {
     return Object.entries(recipe.variants || {})
       .map(([key, v]) => ({ key, precision: v?.precision, vram: v?.vram_minimum_gb }))
       .filter((v) => typeof v.vram === "number" && v.vram > 0)
-      .sort((a, b) => a.vram - b.vram)[0] || null;
+      .sort((a, b) => a.vram - b.vram);
   }, [recipe]);
 
-  // Single-pool deployment options from the rig, each with a fit verdict against
-  // the smallest variant. profileId !== null means the builder can emit a command.
+  // Rig pools verdicted against the CURRENTLY SELECTED variant, so the panel
+  // agrees with the command/warning above it. For a pool the active variant
+  // doesn't fit, surface the smallest variant that WOULD fit (the user can
+  // switch to it with one click) — otherwise the pool is a hard ✗.
+  //   fits          = active variant fits this pool
+  //   fitsWith      = smallest variant that fits (≠ active) | null
+  //   useVariantKey = which variant "use" should load on this pool
   const rigFitPools = useMemo(() => {
     if (!rig || rigVramOf(rig) <= 0) return [];
-    return rigPools(rig).map((p) => ({
-      ...p,
-      fits: smallestVariant ? smallestVariant.vram <= p.vramGb : null,
-    }));
-  }, [rig, smallestVariant]);
+    const activeVram = currentVariant?.vram_minimum_gb;
+    return rigPools(rig).map((p) => {
+      const fits = typeof activeVram === "number" ? activeVram <= p.vramGb : null;
+      const smallestFitting = variantsBySize.find((v) => v.vram <= p.vramGb) || null;
+      const fitsWith = !fits && smallestFitting ? smallestFitting : null;
+      return {
+        ...p,
+        fits,
+        fitsWith,
+        useVariantKey: fits ? variant : (smallestFitting ? smallestFitting.key : variant),
+      };
+    });
+  }, [rig, variantsBySize, currentVariant, variant]);
 
   const recommended = useMemo(() => recommendStrategy(recipe, hwProfile, nodeCount), [recipe, hwProfile, nodeCount]);
 
@@ -802,8 +814,8 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
   // URL once here.
   const useRigPool = (pool) => {
     if (!pool?.profileId) return;
-    const vKey = smallestVariant?.key;
-    if (vKey) setVariant(vKey);
+    const vKey = pool.useVariantKey || variant;
+    setVariant(vKey);
     setHwId(pool.profileId);
     setStrategyOverride("");
     setNodeCount(1);
@@ -1182,8 +1194,9 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
           <YourRigPanel
             rig={rig}
             pools={rigFitPools}
-            smallestVariant={smallestVariant}
+            activeVariant={{ precision: currentVariant.precision, vram: currentVariant.vram_minimum_gb }}
             activeHwId={hwId}
+            activeVariantKey={variant}
             onUse={useRigPool}
           />
         )}
@@ -1511,10 +1524,11 @@ function PdNodeInput({ label, value, gpuPerNode, onChange }) {
   );
 }
 
-// "Your rig" — shows the user's saved local workstation and, for this model,
-// which of their single GPU pools can run it. Pools that map to a taxonomy
-// profile get a "use" button that loads that command into the builder.
-function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
+// "Your rig" — shows the user's saved local workstation and, for the CURRENTLY
+// SELECTED variant, which of their GPU pools can run it (so it agrees with the
+// command/warning above). A pool the active variant doesn't fit but a smaller
+// one would is amber, with a "use <precision>" button that switches to it.
+function YourRigPanel({ rig, pools, activeVariant, activeHwId, activeVariantKey, onUse }) {
   const total = rigVramOf(rig);
   if (total <= 0) {
     return (
@@ -1528,7 +1542,7 @@ function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
       </div>
     );
   }
-  const anyFits = pools.some((p) => p.fits);
+  const anyRunnable = pools.some((p) => p.fits || p.fitsWith);
   return (
     <div className="rounded-xl border border-vllm-blue/30 bg-vllm-blue/[0.04] overflow-hidden">
       <div className="px-4 py-2.5 flex items-center justify-between gap-3 border-b border-vllm-blue/15">
@@ -1541,21 +1555,26 @@ function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
       </div>
       <div className="px-4 py-3 space-y-2">
         <div className="text-[11px] text-muted-foreground">
-          {smallestVariant ? (
-            <>Smallest variant: <span className="font-mono uppercase text-foreground">{smallestVariant.precision}</span> · {smallestVariant.vram} GB to load</>
+          {typeof activeVariant?.vram === "number" ? (
+            <>Selected variant: <span className="font-mono uppercase text-foreground">{activeVariant.precision}</span> · {activeVariant.vram} GB to load</>
           ) : (
             "No VRAM metadata for this model."
           )}
         </div>
         <div className="flex flex-col gap-1.5">
           {pools.map((p) => {
-            const isActive = p.profileId && p.profileId === activeHwId;
+            // "selected" only when this pool's hardware is active AND the current
+            // variant is the one this pool would run — otherwise "use" still has
+            // work to do (switch hardware and/or drop to a fitting variant).
+            const isSelected = p.profileId === activeHwId && p.useVariantKey === activeVariantKey;
             return (
               <div key={p.key} className="flex items-center gap-2.5 text-[13px]">
-                {p.fits === false ? (
-                  <XIcon size={14} className="text-rose-500 shrink-0" />
-                ) : p.fits === true ? (
+                {p.fits === true ? (
                   <CheckIcon size={14} className="text-emerald-500 shrink-0" />
+                ) : p.fitsWith ? (
+                  <CheckIcon size={14} className="text-amber-500 shrink-0" />
+                ) : p.fits === false ? (
+                  <XIcon size={14} className="text-rose-500 shrink-0" />
                 ) : (
                   <span className="w-3.5 inline-flex justify-center text-muted-foreground/50 shrink-0">·</span>
                 )}
@@ -1567,16 +1586,19 @@ function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
                   {p.pipeline ? `${p.gpus} GPUs · ${p.vramGb}G` : `${p.gpus}×${p.vramGb / p.gpus}G = ${p.vramGb}G`}
                 </span>
                 <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">{p.pipeline ? "PP" : "TP"}={p.gpus}</span>
+                <span className="text-[10px] text-amber-600 dark:text-amber-500 w-24 shrink-0 truncate">
+                  {!p.fits && p.fitsWith ? `needs ${p.fitsWith.precision}` : ""}
+                </span>
                 {p.profileId ? (
                   <button
                     onClick={() => onUse(p)}
                     className={`ml-auto rounded-md border px-2 py-0.5 text-[11px] transition-colors ${
-                      isActive
+                      isSelected
                         ? "border-vllm-blue bg-vllm-blue/10 text-foreground"
                         : "border-foreground/20 text-foreground/80 hover:border-foreground/40 hover:bg-muted/40"
                     }`}
                   >
-                    {isActive ? "selected" : "use"}
+                    {isSelected ? "selected" : !p.fits && p.fitsWith ? `use ${p.fitsWith.precision}` : "use"}
                   </button>
                 ) : (
                   <span className="ml-auto text-[10px] text-muted-foreground/60 italic">no recipe command</span>
@@ -1585,9 +1607,9 @@ function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
             );
           })}
         </div>
-        {!anyFits && (
+        {!anyRunnable && (
           <div className="text-[12px] text-rose-500/90 pt-1">
-            This model doesn&apos;t fit any single pool in your rig — try a smaller/quantized model or more VRAM.
+            This model doesn&apos;t fit any pool in your rig — even the smallest variant. Try a smaller/quantized model or more VRAM.
           </div>
         )}
       </div>
