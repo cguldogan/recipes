@@ -112,8 +112,8 @@ const HARDWARE_BY_ID = Object.fromEntries(
 // per_gpu_gb values are single-card capacities. Extend this list to add cards.
 const CARD_CATALOG = [
   { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32 },
-  { id: "rtx5080", label: "RTX 5080", per_gpu_gb: 16 },
   { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24 },
+  { id: "rtx3090", label: "RTX 3090", per_gpu_gb: 24 },
   { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96 },
   { id: "rtxpro5000", label: "RTX PRO 5000", per_gpu_gb: 48 },
   { id: "rtxpro4500", label: "RTX PRO 4500", per_gpu_gb: 32 },
