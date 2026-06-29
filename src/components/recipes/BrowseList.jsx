@@ -3,7 +3,7 @@
 import { useMemo, useCallback } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Layers, Cpu, X, ArrowDownUp, Type, Eye, Sparkles, Hash, SlidersHorizontal, ChevronDown } from "lucide-react";
+import { Layers, Cpu, X, ArrowDownUp, Type, Eye, Sparkles, Hash, SlidersHorizontal, ChevronDown, Plus, Minus } from "lucide-react";
 import { getProviderLogo, getProviderLogoClass, getProviderDisplayName } from "@/lib/providers";
 
 // Per-row decorations: icon (tasks/arch) or colored dot (precision/hardware).
@@ -104,18 +104,50 @@ const HARDWARE_BY_ID = Object.fromEntries(
   HW_BRANDS.flatMap((b) => b.items.map((it) => [it.id, it]))
 );
 
-// "My rig" budgets — total usable VRAM for each way of running the local
-// workstation (2× RTX 5090 + RTX PRO 6000). A model "fits" a budget when its
-// smallest variant's vram_minimum_gb is within it. Single-select: a larger
-// budget is a strict superset of a smaller one, so picking one pool is enough.
-// The mixed all-3 pool only makes sense as a total-VRAM budget here — it isn't
-// a real tensor-parallel config (uneven 32/32/96 GB cards).
-const RIG_OPTIONS = [
-  { id: "rig5090x2", label: "2× RTX 5090 · 64 GB", vram: 64 },
-  { id: "rigpro6000", label: "RTX PRO 6000 · 96 GB", vram: 96 },
-  { id: "rigall3", label: "All 3 cards · 160 GB", vram: 160 },
+// "My rig" — a configurable workstation. Pick card types and a quantity for
+// each; the total VRAM is the fit budget. A model "fits" when its smallest
+// variant's vram_minimum_gb is within that total. The total is a pure VRAM
+// reachability signal — mixed-VRAM cards can't always cleanly tensor-parallel,
+// so a fit here means "could fit in your combined VRAM", not "one clean command".
+// per_gpu_gb values are single-card capacities. Extend this list to add cards.
+const CARD_CATALOG = [
+  { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32 },
+  { id: "rtx5080", label: "RTX 5080", per_gpu_gb: 16 },
+  { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24 },
+  { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96 },
+  { id: "rtxpro5000", label: "RTX PRO 5000", per_gpu_gb: 48 },
+  { id: "rtxpro4500", label: "RTX PRO 4500", per_gpu_gb: 32 },
 ];
-const RIG_BY_ID = Object.fromEntries(RIG_OPTIONS.map((o) => [o.id, o]));
+const CARD_BY_ID = Object.fromEntries(CARD_CATALOG.map((c) => [c.id, c]));
+const MAX_PER_CARD = 16; // sane upper bound on the quantity stepper
+
+// Rig config <-> URL string. Encoded as `rig=rtx5090:2,rtxpro6000:1` — only
+// cards with count > 0, in catalog order, so the URL stays stable/shareable.
+function parseRig(str) {
+  const counts = {};
+  for (const part of (str || "").split(",").filter(Boolean)) {
+    const [id, n] = part.split(":");
+    const c = parseInt(n, 10);
+    if (CARD_BY_ID[id] && c > 0) counts[id] = Math.min(c, MAX_PER_CARD);
+  }
+  return counts;
+}
+function encodeRig(counts) {
+  return CARD_CATALOG
+    .filter((c) => counts[c.id] > 0)
+    .map((c) => `${c.id}:${counts[c.id]}`)
+    .join(",");
+}
+function rigVramOf(counts) {
+  return CARD_CATALOG.reduce((sum, c) => sum + (counts[c.id] || 0) * c.per_gpu_gb, 0);
+}
+// "2× RTX 5090 + 1× RTX PRO 6000" — for the active-filter pill / collapsed view.
+function rigLabel(counts) {
+  return CARD_CATALOG
+    .filter((c) => counts[c.id] > 0)
+    .map((c) => `${counts[c.id]}× ${c.label}`)
+    .join(" + ");
+}
 
 const SORT_OPTIONS = [
   { id: "released", label: "Newest" },
@@ -132,15 +164,17 @@ export function BrowseList({ recipes }) {
   // Single useMemo so the Sets keep stable identity across renders. Without
   // this, downstream useMemos that depend on tasks/archs/etc. invalidate on
   // every render (Set identity changes even if URL didn't).
-  const { tasks, archs, sizes, precisions, hardware, fit, provider, sort, q } = useMemo(() => {
+  const { tasks, archs, sizes, precisions, hardware, rigCounts, rigVram, provider, sort, q } = useMemo(() => {
     const setOf = (k) => new Set((searchParams.get(k) || "").split(",").filter(Boolean));
+    const rigCounts = parseRig(searchParams.get("rig"));
     return {
       tasks: setOf("task"),
       archs: setOf("arch"),
       sizes: setOf("size"),
       precisions: setOf("precision"),
       hardware: setOf("hw"),
-      fit: searchParams.get("fit") || "",
+      rigCounts,
+      rigVram: rigVramOf(rigCounts),
       provider: searchParams.get("provider") || "",
       sort: searchParams.get("sort") || "released",
       q: (searchParams.get("q") || "").trim().toLowerCase(),
@@ -217,9 +251,18 @@ export function BrowseList({ recipes }) {
     [searchParams, update]
   );
 
+  // Set a card's quantity (clamped) and re-encode the whole rig into ?rig=.
+  const setCardCount = useCallback(
+    (id, next) => {
+      const counts = { ...rigCounts, [id]: Math.max(0, Math.min(MAX_PER_CARD, next)) };
+      update({ rig: encodeRig(counts) });
+    },
+    [rigCounts, update]
+  );
+
   const removeOne = useCallback(
     (key, value) => {
-      if (key === "provider" || key === "q" || key === "fit") {
+      if (key === "provider" || key === "q" || key === "rig") {
         update({ [key]: "" });
         return;
       }
@@ -255,10 +298,7 @@ export function BrowseList({ recipes }) {
         const ok = [...hardware].some((h) => hw[h] === "verified");
         if (!ok) return false;
       }
-      if (exclude !== "fit" && fit) {
-        const budget = RIG_BY_ID[fit]?.vram;
-        if (budget && !fitsBudget(r, budget)) return false;
-      }
+      if (exclude !== "rig" && rigVram > 0 && !fitsBudget(r, rigVram)) return false;
       if (exclude !== "provider" && provider && r.hf_org !== provider) return false;
       return true;
     };
@@ -281,9 +321,11 @@ export function BrowseList({ recipes }) {
       }),
       precision: tally("precision", (r) => r.precisions || []),
       hw: tally("hw", (r) => Object.entries(r.meta.hardware || {}).filter(([, s]) => s === "verified").map(([h]) => h)),
-      fit: tally("fit", (r) => RIG_OPTIONS.filter((o) => fitsBudget(r, o.vram)).map((o) => o.id)),
+      // How many recipes fit the current rig VRAM, holding the *other* filters
+      // fixed — shown as a live readout under the card steppers.
+      rigFit: rigVram > 0 ? recipes.filter((r) => matchExcept(r, "rig") && fitsBudget(r, rigVram)).length : 0,
     };
-  }, [recipes, tasks, archs, sizes, precisions, hardware, fit, provider, matchesQ, fitsBudget]);
+  }, [recipes, tasks, archs, sizes, precisions, hardware, rigVram, provider, matchesQ, fitsBudget]);
 
   const filtered = useMemo(() => {
     const out = recipes.filter((r) => {
@@ -301,10 +343,7 @@ export function BrowseList({ recipes }) {
         const ok = [...hardware].some((h) => hw[h] === "verified");
         if (!ok) return false;
       }
-      if (fit) {
-        const budget = RIG_BY_ID[fit]?.vram;
-        if (budget && !fitsBudget(r, budget)) return false;
-      }
+      if (rigVram > 0 && !fitsBudget(r, rigVram)) return false;
       if (provider && r.hf_org !== provider) return false;
       return true;
     });
@@ -317,11 +356,11 @@ export function BrowseList({ recipes }) {
       name: (a, b) => a.hf_id.localeCompare(b.hf_id),
     }[sort] || ((a, b) => 0);
     return [...out].sort(cmp);
-  }, [recipes, tasks, archs, sizes, precisions, hardware, fit, provider, sort, matchesQ, fitsBudget]);
+  }, [recipes, tasks, archs, sizes, precisions, hardware, rigVram, provider, sort, matchesQ, fitsBudget]);
 
   const activeCount =
     tasks.size + archs.size + sizes.size + precisions.size + hardware.size +
-    (fit ? 1 : 0) + (provider ? 1 : 0) + (q ? 1 : 0);
+    (rigVram > 0 ? 1 : 0) + (provider ? 1 : 0) + (q ? 1 : 0);
   const hasFilters = activeCount > 0;
 
   // Flat list of currently-applied filters for the inline pills shown when
@@ -341,10 +380,10 @@ export function BrowseList({ recipes }) {
       const opt = HARDWARE_BY_ID[h];
       if (opt) out.push({ key: "hw", value: h, label: opt.label });
     }
-    if (fit && RIG_BY_ID[fit]) out.push({ key: "fit", value: fit, label: RIG_BY_ID[fit].label });
+    if (rigVram > 0) out.push({ key: "rig", value: "rig", label: `${rigLabel(rigCounts)} · ${rigVram} GB` });
     if (provider) out.push({ key: "provider", value: provider, label: getProviderDisplayName(provider) });
     return out;
-  }, [q, tasks, archs, sizes, precisions, hardware, fit, provider]);
+  }, [q, tasks, archs, sizes, precisions, hardware, rigCounts, rigVram, provider]);
 
   // Panel state persists in the URL (`?panel=open`) so a refresh keeps
   // whatever the user had. Default is closed — applied filters are
@@ -426,19 +465,39 @@ export function BrowseList({ recipes }) {
       {open && (
       <div className="rounded-xl border border-foreground/15 divide-y divide-foreground/10 bg-card/40">
         <FilterRow label="My rig">
-          <PillGroup>
-            {RIG_OPTIONS.map((o) => (
-              <Chip
-                key={o.id}
-                icon={Cpu}
-                active={fit === o.id}
-                count={counts.fit[o.id]}
-                onClick={() => update({ fit: fit === o.id ? "" : o.id })}
-              >
-                {o.label}
-              </Chip>
-            ))}
-          </PillGroup>
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {CARD_CATALOG.map((card) => (
+                <CardStepper
+                  key={card.id}
+                  card={card}
+                  count={rigCounts[card.id] || 0}
+                  onChange={(n) => setCardCount(card.id, n)}
+                />
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[12px]">
+              {rigVram > 0 ? (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-md border border-vllm-blue/40 bg-vllm-blue/10 px-2 py-1 font-mono text-foreground">
+                    <Cpu size={12} className="text-vllm-blue" />
+                    {rigLabel(rigCounts)} · {rigVram} GB total
+                  </span>
+                  <span className="text-muted-foreground">
+                    <span className="font-semibold tabular-nums text-foreground">{counts.rigFit}</span> models fit your VRAM
+                  </span>
+                  <button
+                    onClick={() => update({ rig: "" })}
+                    className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <X size={11} /> reset rig
+                  </button>
+                </>
+              ) : (
+                <span className="text-muted-foreground">Add cards to see which models fit your combined VRAM.</span>
+              )}
+            </div>
+          </div>
         </FilterRow>
 
         <FilterRow label="Task">
@@ -601,6 +660,47 @@ function FilterRow({ label, children }) {
 
 function PillGroup({ children }) {
   return <div className="flex flex-wrap gap-2">{children}</div>;
+}
+
+// One card in the "My rig" builder: label + per-card VRAM + a −/count/+ stepper.
+// Highlights when count > 0. Quantity is clamped by the parent (0..MAX_PER_CARD).
+function CardStepper({ card, count, onChange }) {
+  const active = count > 0;
+  return (
+    <div
+      className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[13px] transition-all ${
+        active
+          ? "border-vllm-blue bg-vllm-blue/10 ring-1 ring-vllm-blue/30"
+          : "border-foreground/20 hover:border-foreground/40 hover:bg-muted/40"
+      }`}
+    >
+      <span className="flex items-center gap-1.5">
+        <Cpu size={13} className={active ? "text-vllm-blue" : "text-muted-foreground"} aria-hidden />
+        <span className="font-medium">{card.label}</span>
+        <span className="font-mono text-[11px] text-muted-foreground">{card.per_gpu_gb}G</span>
+      </span>
+      <span className="inline-flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onChange(count - 1)}
+          disabled={count === 0}
+          aria-label={`Remove one ${card.label}`}
+          className="w-5 h-5 inline-flex items-center justify-center rounded border border-foreground/20 text-muted-foreground hover:text-foreground hover:border-foreground/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        >
+          <Minus size={11} />
+        </button>
+        <span className="w-5 text-center font-mono tabular-nums">{count}</span>
+        <button
+          type="button"
+          onClick={() => onChange(count + 1)}
+          aria-label={`Add one ${card.label}`}
+          className="w-5 h-5 inline-flex items-center justify-center rounded border border-foreground/20 text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-colors"
+        >
+          <Plus size={11} />
+        </button>
+      </span>
+    </div>
+  );
 }
 
 function ActivePill({ children, onRemove }) {
