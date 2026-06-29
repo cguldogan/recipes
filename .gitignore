@@ -14,5 +14,6 @@ public/platforms.json
 public/strategies/
 public/providers/
 public/hf-dates.json
+public/hf-layers.json
 public/*/
 !public/platform-logos/
