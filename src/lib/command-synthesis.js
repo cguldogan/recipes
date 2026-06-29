@@ -823,6 +823,27 @@ export function resolveCommand(recipe, variantKey, strategyName, hwProfileId, en
       Object.assign(env, strategy[roleOverride].env);
     }
 
+    // Combined-rig uneven pipeline-parallel: distribute the model's layers across
+    // stages weighted by each card's VRAM (e.g. 32:32:96), so most layers land on
+    // the biggest card and the small cards don't OOM. Needs the layer count
+    // (recipe.num_layers, from the HF config at build time); without it the UI
+    // falls back to a "set it yourself" note.
+    if (
+      hwProfile.parallel_mode === "pipeline" &&
+      Array.isArray(hwProfile.pp_vram) &&
+      hwProfile.pp_vram.length > 1 &&
+      typeof recipe.num_layers === "number" &&
+      recipe.num_layers > 0
+    ) {
+      const w = hwProfile.pp_vram;
+      const totalW = w.reduce((a, b) => a + b, 0);
+      const L = recipe.num_layers;
+      const parts = w.map((v) => Math.max(1, Math.round((L * v) / totalW)));
+      const diff = L - parts.reduce((a, b) => a + b, 0);
+      if (diff !== 0) parts[parts.indexOf(Math.max(...parts))] += diff; // remainder → biggest card
+      env.VLLM_PP_LAYER_PARTITION = parts.join(",");
+    }
+
     // PD: pin GPUs per role via CUDA_VISIBLE_DEVICES.
     // With per-role `nodes` (new model):
     //   nodes >= 1 → this role owns whole node(s), list all local GPUs

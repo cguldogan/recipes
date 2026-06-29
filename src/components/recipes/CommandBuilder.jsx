@@ -785,20 +785,24 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
       ? { needGb, availGb, gpuCount: hwGpuCount, hwName: hwProfile.display_name || hwId }
       : null;
 
-  // For the combined "All N cards" rig pool: uneven pipeline parallelism needs
+  // For the combined "All N cards" rig pool: uneven pipeline parallelism uses
   // VLLM_PP_LAYER_PARTITION (absolute layer counts per stage, summing to the
-  // model's layer count) so most layers land on the biggest card. We can't know
-  // the layer count, so surface the VRAM-weighted ratio + a worked example.
+  // model's layer count) so most layers land on the biggest card. When we know
+  // the layer count (recipe.num_layers), the command emits the exact split and
+  // we just confirm it; otherwise we show the VRAM-weighted ratio + an example.
   const ppPartition = useMemo(() => {
     const w = hwProfile.parallel_mode === "pipeline" ? hwProfile.pp_vram : null;
     if (!Array.isArray(w) || w.length < 2) return null;
     const g = w.reduce((a, b) => { while (b) { [a, b] = [b, a % b]; } return a; }, 0) || 1;
-    const ratio = w.map((v) => v / g);                        // e.g. [1,1,3]
+    const ratio = w.map((v) => v / g).join(":");               // e.g. "1:1:3"
     const sum = w.reduce((a, b) => a + b, 0);
-    const example = 60;                                        // illustrative layer count
-    const split = w.map((v) => Math.round((example * v) / sum));
-    return { ratio: ratio.join(":"), example, split: split.join(",") };
-  }, [hwProfile]);
+    const layers = typeof recipe.num_layers === "number" && recipe.num_layers > 0 ? recipe.num_layers : null;
+    const base = layers || 60;                                 // real count, or illustrative
+    const parts = w.map((v) => Math.max(1, Math.round((base * v) / sum)));
+    const diff = base - parts.reduce((a, b) => a + b, 0);
+    if (diff !== 0) parts[parts.indexOf(Math.max(...parts))] += diff;
+    return { ratio, auto: !!layers, layers, split: parts.join(",") };
+  }, [hwProfile, recipe]);
 
   const result = useMemo(
     () => {
@@ -1481,10 +1485,20 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
             <span aria-hidden="true" className="text-vllm-blue mt-px">ℹ</span>
             <div className="text-foreground/90">
               <span className="font-semibold">Uses all your cards via pipeline parallelism.</span>{" "}
-              To use the full VRAM (instead of being capped by the smallest card), add{" "}
-              <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">VLLM_PP_LAYER_PARTITION</code>{" "}
-              with layer counts weighted <span className="font-mono">{ppPartition.ratio}</span> (by VRAM) that sum to this model&apos;s layer count.{" "}
-              <span className="text-muted-foreground">e.g. a {ppPartition.example}-layer model → <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">export VLLM_PP_LAYER_PARTITION={ppPartition.split}</code>. Without it, vLLM splits layers evenly and the smallest card OOMs. Pipeline runs stages in sequence, so throughput ≈ a single card.</span>
+              {ppPartition.auto ? (
+                <>
+                  <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">VLLM_PP_LAYER_PARTITION={ppPartition.split}</code>{" "}
+                  spreads this model&apos;s {ppPartition.layers} layers weighted <span className="font-mono">{ppPartition.ratio}</span> by VRAM, so most land on the biggest card.{" "}
+                  <span className="text-muted-foreground">Pipeline runs stages in sequence, so throughput ≈ a single card; lower <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">--max-model-len</code> if the KV cache doesn&apos;t fit.</span>
+                </>
+              ) : (
+                <>
+                  To use the full VRAM (instead of being capped by the smallest card), add{" "}
+                  <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">VLLM_PP_LAYER_PARTITION</code>{" "}
+                  with layer counts weighted <span className="font-mono">{ppPartition.ratio}</span> (by VRAM) that sum to this model&apos;s layer count.{" "}
+                  <span className="text-muted-foreground">e.g. a {ppPartition.layers}-layer model → <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">VLLM_PP_LAYER_PARTITION={ppPartition.split}</code>. Without it, vLLM splits evenly and the smallest card OOMs. Throughput ≈ a single card.</span>
+                </>
+              )}
             </div>
           </div>
         )}

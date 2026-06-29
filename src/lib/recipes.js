@@ -6,6 +6,7 @@ let cache = null;
 
 const MODELS_DIR = path.join(process.cwd(), "models");
 const HF_DATES_PATH = path.join(process.cwd(), "public", "hf-dates.json");
+const HF_LAYERS_PATH = path.join(process.cwd(), "public", "hf-layers.json");
 
 // HF release dates per hf_id (populated at build by scripts/fetch-hf-dates.mjs)
 let hfDates = null;
@@ -17,6 +18,19 @@ function loadHfDates() {
     hfDates = {};
   }
   return hfDates;
+}
+
+// Transformer layer count per hf_id (populated by scripts/fetch-hf-layers.mjs).
+// Used to compute an exact VLLM_PP_LAYER_PARTITION for uneven pipeline pools.
+let hfLayers = null;
+function loadHfLayers() {
+  if (hfLayers !== null) return hfLayers;
+  try {
+    hfLayers = JSON.parse(fs.readFileSync(HF_LAYERS_PATH, "utf8"));
+  } catch {
+    hfLayers = {};
+  }
+  return hfLayers;
 }
 
 function parseRecipe(filePath) {
@@ -35,6 +49,9 @@ function parseRecipe(filePath) {
     // Attach HF release date (ISO string) from build-time manifest
     const dates = loadHfDates();
     raw.hf_released = dates[raw.hf_id] || null;
+    // Attach transformer layer count (for uneven-PP partition math)
+    const layers = loadHfLayers();
+    raw.num_layers = layers[raw.hf_id] || null;
   }
   return raw;
 }
