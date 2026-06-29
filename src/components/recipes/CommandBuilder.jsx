@@ -372,7 +372,7 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
       const saved = parseInt(rs.nodes, 10);
       if ([1, 2].includes(saved)) {
         setNodeCount(saved);
-      } else if (restoredFitsHw) {
+      } else if (restoredFitsHw && !restoredFitsHw.workstation) {
         const v = recipe.variants?.[variant] || recipe.variants?.default || {};
         if (!fitsSingleNode(restoredFitsHw, v)) setNodeCount(2);
       }
@@ -393,11 +393,12 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
       return [1, 2].includes(n) ? n : 1;
     }
     // No URL pin: start on multi-node when the initial hardware can't fit
-    // single-node. Same fit check the hardware-change handler runs.
+    // single-node. Same fit check the hardware-change handler runs. Workstation
+    // rigs (single chassis) can't form a real cluster, so they stay single-node.
     const initialHwId = searchParams.get("hardware") || defaultHw;
     const initialHw = taxonomy.hardware_profiles?.[initialHwId];
     const v = recipe.variants?.[variant] || recipe.variants?.default || {};
-    return initialHw && !fitsSingleNode(initialHw, v) ? 2 : 1;
+    return initialHw && !initialHw.workstation && !fitsSingleNode(initialHw, v) ? 2 : 1;
   });
   // PD-specific per-role node counts. Only surfaced when the active strategy
   // is `pd_cluster`; ignored otherwise. Defaults come from the recipe's
@@ -602,6 +603,15 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
 
   const hwProfile = taxonomy.hardware_profiles?.[hwId] || {};
 
+  // Multi-node is meaningful only for server nodes you can rack together.
+  // A single-chassis workstation rig (multiple cards in one box) can't, so we
+  // never offer multi-node for it — clamp to a single node regardless of how
+  // nodeCount got set (URL, restore, a stale bump before the hardware switch).
+  const hwSupportsMultiNode = supportsMultiNode && !hwProfile.workstation;
+  useEffect(() => {
+    if (hwProfile.workstation && nodeCount !== 1) setNodeCount(1);
+  }, [hwProfile.workstation, nodeCount]);
+
   const recommended = useMemo(() => recommendStrategy(recipe, hwProfile, nodeCount), [recipe, hwProfile, nodeCount]);
 
   const compatibleStrategies = useMemo(() => {
@@ -720,8 +730,8 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     const recipeDefault = recipe.default_strategy;
     const recipeDefaultsSingleNode =
       typeof recipeDefault === "string" && recipeDefault.startsWith("single_node_");
-    const shouldBumpNodes = nodeCount === 1 && supportsMultiNode && !fitsNew;
-    const shouldUnbumpNodes = nodeCount > 1 && fitsNew && recipeDefaultsSingleNode;
+    const shouldBumpNodes = nodeCount === 1 && supportsMultiNode && !newProfile.workstation && !fitsNew;
+    const shouldUnbumpNodes = nodeCount > 1 && (fitsNew || newProfile.workstation) && recipeDefaultsSingleNode;
     if (shouldBumpNodes) setNodeCount(2);
     if (shouldUnbumpNodes) setNodeCount(1);
     syncUrl({
@@ -1261,7 +1271,10 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
                   // Multi-node pill is disabled when the recipe declares no
                   // multi_node_* (or pd_cluster) strategy. Small dense models
                   // commonly omit these.
-                  const noMultiNode = n > 1 && !supportsMultiNode;
+                  // Multi-node is unavailable when the recipe declares no
+                  // multi_node_* / pd_cluster strategy, OR the hardware is a
+                  // single-chassis workstation rig (can't be clustered).
+                  const noMultiNode = n > 1 && !hwSupportsMultiNode;
                   // Single-node pill is disabled when the variant can't fit on
                   // one node of the selected hardware — same struck-through
                   // treatment as unsupported hardware pills. Multi-node still
@@ -1277,9 +1290,14 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
                       onClick={() => !disabled && selectNodes(n)}
                       title={
                         noMultiNode
-                          ? "This recipe does not declare a multi-node strategy. Fits in a single node."
+                          ? hwProfile.workstation
+                            ? `${hwProfile.display_name || "This workstation"} is a single machine — it can't be clustered into multiple nodes.`
+                            : "This recipe does not declare a multi-node strategy. Fits in a single node."
                           : singleNodeDoesntFit
-                            ? `Single-node can't fit this variant on ${hwProfile.display_name || "the selected hardware"} (${currentVariant.vram_minimum_gb}GB > ${hwProfile.vram_gb}GB) — use multi-node`
+                            ? `This variant needs ${currentVariant.vram_minimum_gb}GB but ${hwProfile.display_name || "the selected hardware"} has ${hwProfile.vram_gb}GB` +
+                              (hwProfile.workstation
+                                ? " — pick a smaller/quantized variant or add VRAM."
+                                : " — use multi-node.")
                             : n === 1
                               ? "Single-node deployment (one HGX box)"
                               : `2 nodes × ${hwProfile.gpu_count || 8} GPUs = ${2 * (hwProfile.gpu_count || 8)} GPUs total. Scale further by replicating the worker command with higher --node-rank / --data-parallel-start-rank.`
