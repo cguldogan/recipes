@@ -683,10 +683,18 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
   // null until mounted, then the persisted card→count map.
   const [rig, setRig] = useState(null);
   useEffect(() => {
-    setRig(loadRig());
+    const loaded = loadRig();
+    setRig(loaded);
+    // The synthetic combined profile isn't in the taxonomy at mount (rig loads
+    // here, after the hwId guard ran), so a shared/reloaded ?hardware=__rig_combined__
+    // link falls back to the default. Re-apply it once the rig is loaded.
+    if (searchParams.get("hardware") === RIG_COMBINED_ID && rigCombinedProfile(loaded)) {
+      setHwId(RIG_COMBINED_ID);
+    }
     const onStorage = (e) => { if (e.key === null || e.key === "vllm-recipes:my-rig") setRig(loadRig()); };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The combined "All N cards" pool needs a hardware profile to render a
@@ -776,6 +784,21 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     isSingleNode && typeof needGb === "number" && typeof availGb === "number" && availGb > 0 && needGb > availGb
       ? { needGb, availGb, gpuCount: hwGpuCount, hwName: hwProfile.display_name || hwId }
       : null;
+
+  // For the combined "All N cards" rig pool: uneven pipeline parallelism needs
+  // VLLM_PP_LAYER_PARTITION (absolute layer counts per stage, summing to the
+  // model's layer count) so most layers land on the biggest card. We can't know
+  // the layer count, so surface the VRAM-weighted ratio + a worked example.
+  const ppPartition = useMemo(() => {
+    const w = hwProfile.parallel_mode === "pipeline" ? hwProfile.pp_vram : null;
+    if (!Array.isArray(w) || w.length < 2) return null;
+    const g = w.reduce((a, b) => { while (b) { [a, b] = [b, a % b]; } return a; }, 0) || 1;
+    const ratio = w.map((v) => v / g);                        // e.g. [1,1,3]
+    const sum = w.reduce((a, b) => a + b, 0);
+    const example = 60;                                        // illustrative layer count
+    const split = w.map((v) => Math.round((example * v) / sum));
+    return { ratio: ratio.join(":"), example, split: split.join(",") };
+  }, [hwProfile]);
 
   const result = useMemo(
     () => {
@@ -1448,6 +1471,20 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
               but this variant needs at least {vramShortfall.needGb}GB for weights alone
               (KV cache requires more).{" "}
               <span className="text-muted-foreground">Switch to a higher-memory GPU, use multi-node TP, or lower <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">--max-model-len</code> to shrink the KV cache footprint.</span>
+            </div>
+          </div>
+        )}
+
+        {/* ── Uneven pipeline-parallel note (combined rig pool) ── */}
+        {ppPartition && (
+          <div className="rounded-xl border border-vllm-blue/30 bg-vllm-blue/[0.06] px-3 py-2 text-[12px] leading-snug flex items-start gap-2">
+            <span aria-hidden="true" className="text-vllm-blue mt-px">ℹ</span>
+            <div className="text-foreground/90">
+              <span className="font-semibold">Uses all your cards via pipeline parallelism.</span>{" "}
+              To use the full VRAM (instead of being capped by the smallest card), add{" "}
+              <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">VLLM_PP_LAYER_PARTITION</code>{" "}
+              with layer counts weighted <span className="font-mono">{ppPartition.ratio}</span> (by VRAM) that sum to this model&apos;s layer count.{" "}
+              <span className="text-muted-foreground">e.g. a {ppPartition.example}-layer model → <code className="font-mono text-[11px] px-1 py-px rounded bg-muted/50">export VLLM_PP_LAYER_PARTITION={ppPartition.split}</code>. Without it, vLLM splits layers evenly and the smallest card OOMs. Pipeline runs stages in sequence, so throughput ≈ a single card.</span>
             </div>
           </div>
         )}

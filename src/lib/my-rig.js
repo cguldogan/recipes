@@ -112,53 +112,56 @@ export function rigPools(counts) {
   }
   const totalGpus = rigGpuCount(counts);
   if (rigCardTypes(counts) >= 2 && totalGpus >= 2) {
-    // Even-split pipeline-parallel puts ~model/N on EACH stage, so usable
-    // capacity is bounded by the smallest card × N — NOT the VRAM sum. (vLLM
-    // splits layers evenly by default; exploiting a bigger card needs a manual
-    // VLLM_PP_LAYER_PARTITION we don't generate.) Only offer the combined pool
-    // when it actually beats the best single pool — for an uneven rig like
-    // 2×32+96 the effective 96 GB just matches the big card, so it's hidden.
-    const effective = totalGpus * rigMinPerCard(counts);
-    const bestSingle = pools.length ? Math.max(...pools.map((p) => p.vramGb)) : 0;
-    if (effective > bestSingle) {
-      pools.push({
-        key: "combined",
-        label: `All ${totalGpus} cards`,
-        gpus: totalGpus,
-        vramGb: effective,
-        totalVramGb: rigVramOf(counts),
-        profileId: RIG_COMBINED_ID,
-        pipeline: true,
-      });
-    }
+    // "All N cards" via UNEVEN pipeline parallelism: with VLLM_PP_LAYER_PARTITION
+    // weighting layers by each card's VRAM (e.g. 32:32:96), the full VRAM sum is
+    // usable — most layers land on the biggest card. (Plain even-split PP would
+    // cap at smallest×N and OOM, which is why the command ships the partition.)
+    pools.push({
+      key: "combined",
+      label: `All ${totalGpus} cards`,
+      gpus: totalGpus,
+      vramGb: rigVramOf(counts),
+      vramList: rigGpuVramList(counts),
+      profileId: RIG_COMBINED_ID,
+      pipeline: true,
+    });
   }
   return pools;
 }
 
-// Honest "largest model this rig can actually serve" — the biggest single
-// deployable pool (TP within a card type, a single card, or even-split PP
-// across all). Used as the Browse "My rig" fit budget so it never claims a
-// model fits when even-split PP would OOM the smallest card.
+// Per-GPU VRAM, one entry per physical card (e.g. 2×5090 + 6000 → [32,32,96]).
+// The pipeline-partition weights are derived from this.
+export function rigGpuVramList(counts) {
+  const list = [];
+  for (const c of CARD_CATALOG) {
+    for (let i = 0; i < (counts[c.id] || 0); i++) list.push(c.per_gpu_gb);
+  }
+  return list;
+}
+
+// Largest model this rig can serve — the biggest deployable pool (single card,
+// TP within a card type, or uneven-PP across all). Used as the Browse fit budget.
 export function rigUsableVram(counts) {
   const pools = rigPools(counts);
   return pools.length ? Math.max(...pools.map((p) => p.vramGb)) : 0;
 }
 
 // The synthetic taxonomy profile the command builder registers for the combined
-// pool. Pipeline-parallel across every card; VRAM is the even-split usable
-// amount (smallest card × N). null when the rig has fewer than 2 GPUs.
+// pool. Uneven pipeline-parallel across every card (layers weighted by VRAM via
+// VLLM_PP_LAYER_PARTITION), so the full VRAM sum is usable. `pp_vram` is the
+// per-GPU VRAM list used to build the partition. null when fewer than 2 GPUs.
 export function rigCombinedProfile(counts) {
   const totalGpus = rigGpuCount(counts);
   if (totalGpus < 2) return null;
-  const effective = totalGpus * rigMinPerCard(counts);
   return {
     brand: "NVIDIA",
     generation: "blackwell",
     display_name: "Your rig",
-    description: `${rigLabel(counts)} · pipeline-parallel (even split, ~${effective} GB usable)`,
+    description: `${rigLabel(counts)} · uneven pipeline-parallel across all cards`,
     gpu_count: totalGpus,
-    vram_gb: effective,
+    vram_gb: rigVramOf(counts),
     scalable: false,
     parallel_mode: "pipeline",
+    pp_vram: rigGpuVramList(counts),
   };
 }

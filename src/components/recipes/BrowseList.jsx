@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Layers, Cpu, X, ArrowDownUp, Type, Eye, Sparkles, Hash, SlidersHorizontal, ChevronDown, Plus, Minus } from "lucide-react";
 import { getProviderLogo, getProviderLogoClass, getProviderDisplayName } from "@/lib/providers";
-import { CARD_CATALOG, MAX_PER_CARD, parseRig, encodeRig, rigVramOf, rigUsableVram, rigLabel, saveRig } from "@/lib/my-rig";
+import { CARD_CATALOG, MAX_PER_CARD, parseRig, encodeRig, rigUsableVram, rigLabel, saveRig } from "@/lib/my-rig";
 import { searchRecipes } from "@/lib/search";
 
 // Per-row decorations: icon (tasks/arch) or colored dot (precision/hardware).
@@ -328,7 +328,7 @@ export function BrowseList({ recipes }) {
       const opt = HARDWARE_BY_ID[h];
       if (opt) out.push({ key: "hw", value: h, label: opt.label });
     }
-    if (rigVram > 0) out.push({ key: "rig", value: "rig", label: `${rigLabel(rigCounts)} · ${rigVram} GB usable` });
+    if (rigVram > 0) out.push({ key: "rig", value: "rig", label: `${rigLabel(rigCounts)} · ${rigVram} GB` });
     if (provider) out.push({ key: "provider", value: provider, label: getProviderDisplayName(provider) });
     return out;
   }, [q, tasks, archs, sizes, precisions, hardware, rigCounts, rigVram, provider]);
@@ -429,7 +429,7 @@ export function BrowseList({ recipes }) {
                 <>
                   <span className="inline-flex items-center gap-1.5 rounded-md border border-vllm-blue/40 bg-vllm-blue/10 px-2 py-1 font-mono text-foreground">
                     <Cpu size={12} className="text-vllm-blue" />
-                    {rigLabel(rigCounts)} · {rigVramOf(rigCounts)} GB · {rigVram} GB usable
+                    {rigLabel(rigCounts)} · {rigVram} GB
                   </span>
                   <span className="text-muted-foreground">
                     <span className="font-semibold tabular-nums text-foreground">{counts.rigFit}</span> models fit your rig
