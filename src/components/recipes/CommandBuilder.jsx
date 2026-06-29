@@ -7,7 +7,7 @@ import { Copy, Check, Terminal, Gauge, Sparkles, ChevronDown, Package, Info, Zap
 import { resolveCommand, recommendStrategy, isPrecisionCompatible, isHardwareSupported, fitsSingleNode, pickDefaultHardware, resolveSingleNodeTp, computeDockerMeta, buildDockerRun } from "@/lib/command-synthesis";
 import { TooltipProvider, InfoTip } from "@/components/ui/tooltip";
 import { detectPlaceholdersAll, substitute, substituteEnv, loadEndpoints, saveEndpoint, clearEndpoints } from "@/lib/cluster-endpoints";
-import { loadRig, rigPools, rigLabel, rigVramOf } from "@/lib/my-rig";
+import { loadRig, rigPools, rigLabel, rigVramOf, rigCombinedProfile, RIG_COMBINED_ID } from "@/lib/my-rig";
 import { Cpu, Check as CheckIcon, X as XIcon } from "lucide-react";
 
 // Advanced tuning presets — optional tunable flags the user can opt into.
@@ -603,17 +603,6 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     );
   }, [taxonomy]);
 
-  const hwProfile = taxonomy.hardware_profiles?.[hwId] || {};
-
-  // Multi-node is meaningful only for server nodes you can rack together.
-  // A single-chassis workstation rig (multiple cards in one box) can't, so we
-  // never offer multi-node for it — clamp to a single node regardless of how
-  // nodeCount got set (URL, restore, a stale bump before the hardware switch).
-  const hwSupportsMultiNode = supportsMultiNode && !hwProfile.workstation;
-  useEffect(() => {
-    if (hwProfile.workstation && nodeCount !== 1) setNodeCount(1);
-  }, [hwProfile.workstation, nodeCount]);
-
   // "Your rig" — the user's saved local workstation (from the Browse builder).
   // Loaded client-side only (localStorage) to avoid SSR hydration mismatch:
   // null until mounted, then the persisted card→count map.
@@ -624,6 +613,31 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+
+  // The combined "All N cards" pool needs a hardware profile to render a
+  // command. It isn't a real taxonomy entry (it's the user's specific rig), so
+  // inject a synthetic one under RIG_COMBINED_ID into the taxonomy the builder
+  // reads — without adding it to the brand-grouped hardware pills below.
+  const taxonomyWithRig = useMemo(() => {
+    const combined = rig ? rigCombinedProfile(rig) : null;
+    if (!combined) return taxonomy;
+    return {
+      ...taxonomy,
+      hardware_profiles: { ...taxonomy.hardware_profiles, [RIG_COMBINED_ID]: combined },
+    };
+  }, [taxonomy, rig]);
+  const hwProfiles = taxonomyWithRig.hardware_profiles;
+
+  const hwProfile = hwProfiles?.[hwId] || {};
+
+  // Multi-node is meaningful only for server nodes you can rack together.
+  // A single-chassis workstation rig (multiple cards in one box) can't, so we
+  // never offer multi-node for it — clamp to a single node regardless of how
+  // nodeCount got set (URL, restore, a stale bump before the hardware switch).
+  const hwSupportsMultiNode = supportsMultiNode && !hwProfile.workstation;
+  useEffect(() => {
+    if (hwProfile.workstation && nodeCount !== 1) setNodeCount(1);
+  }, [hwProfile.workstation, nodeCount]);
 
   // Smallest declared variant — the most-runnable footprint, used to verdict
   // each rig pool. { key, precision, vram } or null when no size metadata.
@@ -686,9 +700,9 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
           decode: { nodes: pdDecodeNodes, rank: pdDecodeRank },
         }
         : null;
-      return resolveCommand(recipe, variant, activeStrategy, hwId, features, strategies, taxonomy, advArgs, nodeCount, pdNodes);
+      return resolveCommand(recipe, variant, activeStrategy, hwId, features, strategies, taxonomyWithRig, advArgs, nodeCount, pdNodes);
     },
-    [recipe, variant, activeStrategy, hwId, features, advanced, advancedById, strategies, taxonomy, nodeCount, pdPrefillNodes, pdDecodeNodes, pdPrefillRank, pdDecodeRank]
+    [recipe, variant, activeStrategy, hwId, features, advanced, advancedById, strategies, taxonomyWithRig, nodeCount, pdPrefillNodes, pdDecodeNodes, pdPrefillRank, pdDecodeRank]
   );
 
   // Visual feedback when any rendered command changes. Covers single-node
@@ -727,7 +741,7 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     // Only swap hardware when precision demands it (e.g. NVFP4 needs Blackwell).
     // VRAM is not a blocker because multi-node TP/DP can always supply more.
     const v = recipe.variants?.[key] || {};
-    const currentProfile = taxonomy.hardware_profiles?.[hwId] || {};
+    const currentProfile = hwProfiles?.[hwId] || {};
     if (!isPrecisionCompatible(currentProfile, v)) {
       const next = pickDefaultHardware(taxonomy.hardware_profiles, v, recipe);
       setHwId(next);
@@ -757,7 +771,7 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     // because the model didn't fit a 4-GPU tray) to B300/GB300 would stay at
     // 2 nodes and pick the multi-node sibling. Tied to the click so a
     // deliberate Single-/Multi-node click afterwards still wins.
-    const newProfile = taxonomy.hardware_profiles?.[id] || {};
+    const newProfile = hwProfiles?.[id] || {};
     const fitsNew = fitsSingleNode(newProfile, currentVariant);
     const recipeDefault = recipe.default_strategy;
     const recipeDefaultsSingleNode =
@@ -780,6 +794,21 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
       nodes: shouldBumpNodes ? 2 : shouldUnbumpNodes ? 1 : nodeCount,
       features: next,
     });
+  };
+
+  // "use" a pool from the Your-rig panel: switch hardware + load the smallest
+  // variant in one atomic update. Chaining selectVariant + selectHardware races
+  // (each reads the same stale searchParams), so set both states and sync the
+  // URL once here.
+  const useRigPool = (pool) => {
+    if (!pool?.profileId) return;
+    const vKey = smallestVariant?.key;
+    if (vKey) setVariant(vKey);
+    setHwId(pool.profileId);
+    setStrategyOverride("");
+    setNodeCount(1);
+    syncUrl({ variant: vKey, hardware: pool.profileId, strategy: "" });
+    saveRecipeState(recipe.hf_id, { strategy: undefined, nodes: 1 });
   };
 
   const selectStrategy = (s) => {
@@ -971,9 +1000,11 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
     ? "PD cluster"
     : result.deployType === "multi_node"
       ? (strategies[activeStrategy]?.display_name || activeStrategy)
-      : effectiveTp
-        ? `TP=${effectiveTp}`
-        : (strategies[activeStrategy]?.display_name || activeStrategy);
+      : hwProfile.parallel_mode === "pipeline"
+        ? `PP=${hwProfile.gpu_count}`
+        : effectiveTp
+          ? `TP=${effectiveTp}`
+          : (strategies[activeStrategy]?.display_name || activeStrategy);
   const precisionPart = currentVariant.precision?.toUpperCase();
   const configSummary = [hwPart, strategyPart, precisionPart].filter(Boolean).join(" · ");
 
@@ -1153,10 +1184,7 @@ export function CommandBuilder({ recipe, strategies, taxonomy }) {
             pools={rigFitPools}
             smallestVariant={smallestVariant}
             activeHwId={hwId}
-            onUse={(pool) => {
-              if (smallestVariant) selectVariant(smallestVariant.key);
-              if (pool.profileId) selectHardware(pool.profileId);
-            }}
+            onUse={useRigPool}
           />
         )}
 
@@ -1531,9 +1559,14 @@ function YourRigPanel({ rig, pools, smallestVariant, activeHwId, onUse }) {
                 ) : (
                   <span className="w-3.5 inline-flex justify-center text-muted-foreground/50 shrink-0">·</span>
                 )}
-                <span className="font-medium w-32 shrink-0 truncate">{p.label}</span>
-                <span className="font-mono text-[11px] text-muted-foreground w-28 shrink-0">{p.gpus}×{p.vramGb / p.gpus}G = {p.vramGb}G</span>
-                <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">TP={p.gpus}</span>
+                <span className="font-medium w-32 shrink-0 truncate">
+                  {p.label}
+                  {p.pipeline && <span className="ml-1 text-[10px] font-normal text-muted-foreground">pipeline</span>}
+                </span>
+                <span className="font-mono text-[11px] text-muted-foreground w-28 shrink-0">
+                  {p.pipeline ? `${p.gpus} GPUs · ${p.vramGb}G` : `${p.gpus}×${p.vramGb / p.gpus}G = ${p.vramGb}G`}
+                </span>
+                <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">{p.pipeline ? "PP" : "TP"}={p.gpus}</span>
                 {p.profileId ? (
                   <button
                     onClick={() => onUse(p)}

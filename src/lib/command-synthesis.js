@@ -486,6 +486,13 @@ export function resolveCommand(recipe, variantKey, strategyName, hwProfileId, en
           args.push("--master-addr", `$${roleKey.toUpperCase()}_NODE_1`);
         }
       }
+    } else if (hwProfile.parallel_mode === "pipeline") {
+      // Heterogeneous single-chassis rig (e.g. 2× RTX 5090 + RTX PRO 6000):
+      // tensor-parallel requires identical cards, so pool the uneven cards with
+      // pipeline parallelism instead — one pipeline stage per GPU, each holding
+      // a slice of the layers in its own VRAM. Lower throughput than TP, but the
+      // only way to use cards of different sizes together.
+      args.push("--pipeline-parallel-size", String(Math.max(2, gpuCount)));
     } else {
       // Single-node TP / TEP / DEP. `singleNodeTp` equals `gpuCount` for
       // everything except single_node_tp with a recipe-declared

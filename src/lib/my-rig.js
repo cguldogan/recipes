@@ -76,9 +76,24 @@ export function saveRig(counts) {
   }
 }
 
-// Deployable single-pool options for a rig: for each owned card type, a 1× pool
-// and (when you own ≥2) an N× pool. Each carries the taxonomy profile id the
-// command builder can render, or null when none exists for that count.
+// Synthetic hardware-profile id for "use every card in the rig at once". The
+// command builder injects a profile under this id (rigCombinedProfile) so the
+// pool can render a command even though it isn't a real taxonomy entry.
+export const RIG_COMBINED_ID = "__rig_combined__";
+
+export function rigGpuCount(counts) {
+  return CARD_CATALOG.reduce((s, c) => s + (counts[c.id] || 0), 0);
+}
+function rigCardTypes(counts) {
+  return CARD_CATALOG.filter((c) => (counts[c.id] || 0) > 0).length;
+}
+
+// Deployable pool options for a rig:
+//  - per owned card type: a 1× pool and (when you own ≥2) an N× pool, each
+//    tensor-parallel and mapped to a taxonomy profile id when one exists.
+//  - when the rig mixes ≥2 card types: an "All N cards" pool that pools every
+//    card via pipeline parallelism (the only way to combine uneven VRAM —
+//    tensor-parallel needs identical cards). profileId = RIG_COMBINED_ID.
 export function rigPools(counts) {
   const pools = [];
   for (const c of CARD_CATALOG) {
@@ -89,5 +104,34 @@ export function rigPools(counts) {
       pools.push({ key: `${c.id}-${n}`, label: `${c.label} ×${n}`, gpus: n, vramGb: c.per_gpu_gb * n, profileId: c.profiles[n] || null });
     }
   }
+  const totalGpus = rigGpuCount(counts);
+  if (rigCardTypes(counts) >= 2 && totalGpus >= 2) {
+    pools.push({
+      key: "combined",
+      label: `All ${totalGpus} cards`,
+      gpus: totalGpus,
+      vramGb: rigVramOf(counts),
+      profileId: RIG_COMBINED_ID,
+      pipeline: true,
+    });
+  }
   return pools;
+}
+
+// The synthetic taxonomy profile the command builder registers for the combined
+// pool. Pipeline-parallel across every card; VRAM is the rig total. null when
+// the rig has fewer than 2 GPUs (nothing to combine).
+export function rigCombinedProfile(counts) {
+  const totalGpus = rigGpuCount(counts);
+  if (totalGpus < 2) return null;
+  return {
+    brand: "NVIDIA",
+    generation: "blackwell",
+    display_name: "Your rig",
+    description: `${rigLabel(counts)} · pipeline-parallel across all cards`,
+    gpu_count: totalGpus,
+    vram_gb: rigVramOf(counts),
+    workstation: true,
+    parallel_mode: "pipeline",
+  };
 }
