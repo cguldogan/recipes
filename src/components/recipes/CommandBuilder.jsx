@@ -1956,7 +1956,7 @@ function YourRigPanel({ rig, pools, activeVariant, activeHwId, activeVariantKey,
                   {p.pipeline && <span className="ml-1 text-[10px] font-normal text-muted-foreground">pipeline</span>}
                 </span>
                 <span className="font-mono text-[11px] text-muted-foreground w-28 shrink-0">
-                  {p.pipeline ? `${p.gpus} GPUs · ${p.vramGb}G` : `${p.gpus}×${p.vramGb / p.gpus}G = ${p.vramGb}G`}
+                  {p.pipeline ? `${p.gpus} GPUs · ${p.vramGb}G usable` : `${p.gpus}×${p.vramGb / p.gpus}G = ${p.vramGb}G`}
                 </span>
                 <span className="font-mono text-[11px] text-muted-foreground w-14 shrink-0">{p.pipeline ? "PP" : "TP"}={p.gpus}</span>
                 <span className="text-[10px] w-36 shrink-0 truncate">
