@@ -7,10 +7,12 @@
 // a mapped profile still get a fit verdict in the panel, just no "use" button.
 
 export const CARD_CATALOG = [
-  { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32, profiles: { 1: "rtx5090", 2: "rtx5090_x2" } },
-  { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24, profiles: {} },
+  { id: "rtx5090", label: "RTX 5090", per_gpu_gb: 32, profiles: { 1: "rtx_5090", 2: "rtx_5090_2x" } },
+  { id: "rtx4090", label: "RTX 4090", per_gpu_gb: 24, profiles: { 2: "rtx_4090_2x" } },
   { id: "rtx3090", label: "RTX 3090", per_gpu_gb: 24, profiles: {} },
-  { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96, profiles: { 1: "rtx_pro_6000" } },
+  { id: "rtxpro6000", label: "RTX PRO 6000", per_gpu_gb: 96, profiles: { 1: "rtx_pro_6000", 2: "rtx_pro_6000_2x", 8: "rtx_pro_6000_8x" } },
+  // Note: taxonomy's `rtx_pro_5000_4x` is the 72 GB Blackwell part, not this
+  // 48 GB card — deliberately left unmapped.
   { id: "rtxpro5000", label: "RTX PRO 5000", per_gpu_gb: 48, profiles: {} },
   { id: "rtxpro4500", label: "RTX PRO 4500", per_gpu_gb: 32, profiles: {} },
 ];
